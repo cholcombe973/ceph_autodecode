@@ -3,17 +3,27 @@ import os
 __author__ = 'chris holcombe'
 import CppHeaderParser
 
-decoded_types = {'eversion_t': 'Eversion',
-                 'pg_shard_t': 'unknown',
-                 'hobject_t': 'HObject',
-                 'utime_t': 'Utime',
-                 'ECSubWrite': 'ECSubWrite',
-                 'ECSubWriteReply': 'ECSubWriteReply',
-                 'ECSubRead': 'ECSubRead',
-                 'ECSubReadReply': 'ECSubReadReply',
-                 'pg_history_t': 'PgHistory',
-                 }
-struct_mapping = {
+decoded_types = {
+    'eversion_t': 'Eversion',
+    'pg_shard_t': 'unknown',
+    'hobject_t': 'HObject',
+    'utime_t': 'Utime',
+    'osd_peer_stat_t': 'Utime',
+    'ECSubWrite': 'ECSubWrite',
+    'ECSubWriteReply': 'ECSubWriteReply',
+    'ECSubRead': 'ECSubRead',
+    'ECSubReadReply': 'ECSubReadReply',
+    'pg_history_t': 'PgHistory',
+    'spg_t': 'SpgT',
+    'pg_stat_t': 'PgStatT',
+    'object_stat_collection_t': 'ObjectStatCollectionT',
+    'PushReplyOp': 'PushReplyOp',
+    'PushOp': 'PushOp',
+    'op_type_t': 'OpTypeT',
+    'entity_addr_t': 'EntityAddr',
+}
+
+write_to_wire_mapping = {
     'uuid_d': 'Uuid',
     # '':'le_i8',
     'bool': 'u8',
@@ -39,15 +49,46 @@ struct_mapping = {
     'string': '\'a &str',
 }
 
+struct_mapping = {
+    'uuid_d': 'Uuid',
+    # '':'le_i8',
+    'bool': 'u8',
+    'shard_id_t': 'i8',
+    'uint8_t': 'u8',
+    '__u8': 'u8',
+    '__s16': 'i16',
+    '__u16': 'u16',
+    '__le16': 'u16',
+    'int': 'i32',
+    'int32_t': 'i32',
+    'uint32_t': 'u32',
+    '__u32': 'u32',
+    '__s32': 'u32',
+    'loff_t': 'u64',
+    'int64_t': 'i64',
+    'uint64_t': 'u64',
+    '__le64': 'u64',
+    # '':'be_u16,
+    'double': 'f64',
+    'errorcode32_t': 'i32',
+    'version_t': 'u64',
+    'ceph_tid_t': 'u64',
+    'epoch_t': 'u32',
+    'std::string': '\'a &str',
+    'string': '\'a &str',
+}
+
 nom_mapping = {
     'uuid_d': 'parse_fsid',
     # '':'le_i8',
     'bool': 'le_u8',
     '__u8': 'le_u8',
+    'uint8_t': 'le_u8',
     'shard_id_t': 'le_i8',
     '__s16': 'le_i16',
     '__u16': 'le_u16',
     '__le16': 'le_u16',
+    'int': 'le_i32',
     'int32_t': 'le_i32',
     'uint32_t': 'le_u32',
     '__u32': 'le_u32',
@@ -57,6 +98,7 @@ nom_mapping = {
     'uint64_t': 'le_u64',
     '__le64': 'le_u64',
     # '':'be_u16,
+    'double': 'le_f64',
     'errorcode32_t': 'le_i32',
     'version_t': 'le_u64',
     'ceph_tid_t': 'le_u64',
@@ -94,6 +136,16 @@ def resolve_type(ceph_type):
     return output
 
 
+def underscore_to_camelcase(value):
+    def camelcase():
+        yield str.capitalize
+        while True:
+            yield str.capitalize
+
+    c = camelcase()
+    return "".join(c.next()(x) if x else '_' for x in value.split("_"))
+
+
 def split_map(ceph_map):
     if ceph_map.startswith('std::map'):
         parts = ceph_map.strip('std::map<').rstrip('>').split(',')
@@ -110,6 +162,8 @@ def split_map(ceph_map):
 def split_vector(ceph_vector):
     if ceph_vector.startswith('list'):
         return ceph_vector.strip('list<').rstrip('>').strip()
+    elif ceph_vector.startswith('set'):
+        return ceph_vector.strip('set<').rstrip('>').strip()
     elif ceph_vector.startswith('std::vector'):
         return ceph_vector.strip('std::vector<').rstrip('>').strip()
     else:
@@ -119,7 +173,7 @@ def split_vector(ceph_vector):
 def add_struct(struct_name, public_properties):
     output = [
         "#[derive(Debug,Eq,PartialEq)]",
-        "pub struct " + struct_name + "{"
+        "pub struct " + underscore_to_camelcase(struct_name) + "{"
     ]
     members = {}
     for line in public_properties:
@@ -144,7 +198,7 @@ def add_struct(struct_name, public_properties):
 
 
 def add_impl(struct_name, public_properties):
-    output = ["impl<'a> CephPrimitive<'a> for {}{{".format(struct_name),
+    output = ["impl<'a> CephPrimitive<'a> for {}{{".format(underscore_to_camelcase(struct_name)),
               "\tfn read_from_wire(input: &'a [u8]) -> nom::IResult<&[u8], Self>{"]
     for i in public_properties:
         if i['name'] == 'HEAD_VERSION':
@@ -170,12 +224,18 @@ def add_impl(struct_name, public_properties):
                     decoded_types[ceph_type_map[1]],
                 ))
             else:
-                print("Unknown map type: " + str(ceph_type))
+                pass
 
         elif ceph_type.startswith('pair'):
             ceph_type_map = split_map(ceph_type)
-            print("Unknown pair types: " + str(ceph_type_map))
-
+            if ceph_type_map[0] in decoded_types:
+                output.append("\t{}: HashMap<{},{}>,".format(
+                    line['name'],
+                    decoded_types[ceph_type_map[0]],
+                    decoded_types[ceph_type_map[1]]
+                ))
+            else:
+                pass
         elif ceph_type.startswith('std::map'):
             ceph_type_map = split_map(ceph_type)
             if ceph_type_map[0] in decoded_types:
@@ -185,21 +245,25 @@ def add_impl(struct_name, public_properties):
                     decoded_types[ceph_type_map[1]]
                 ))
             else:
-                print("Unknown std::map type: " + str(ceph_type))
+                pass
 
         elif ceph_type.startswith('vector'):
             ceph_type_vector = split_vector(ceph_type)
             if ceph_type_vector in nom_mapping:
+                output.append("\tcount: le_u32 ~")
                 output.append("\t{}: count!({}, count),".format(line['name'], nom_mapping[ceph_type_vector]))
             else:
-                print("Unknown vector type: " + str(ceph_type))
+                pass
+                # print("Unknown vector type: " + str(ceph_type))
 
-        elif ceph_type.startswith('list'):
+        elif ceph_type.startswith('list') or ceph_type.startswith('set'):
             ceph_type_vector = split_vector(ceph_type)
             if ceph_type_vector in nom_mapping:
+                output.append("\tcount: le_u32 ~")
                 output.append("\t{}: count!({},count)".format(line['name'], nom_mapping[ceph_type_vector]))
             else:
-                print("Unknown list type: " + str(ceph_type))
+                pass
+                # print("Unknown list type: " + str(ceph_type))
 
         elif ceph_type in nom_mapping:
             output.append("\t\t" + line['name'] + ": " + nom_mapping[ceph_type] + " ~")
@@ -207,12 +271,14 @@ def add_impl(struct_name, public_properties):
             if ceph_type in decoded_types:
                 output.append("\t{}: {},".format(line['name'], decoded_types[ceph_type]))
             else:
+                output.append("\t{}: {},".format(line['name'], ceph_type))
                 print("Unknown type line 207: '" + str(ceph_type) + "'")
-            # resolved_parts = resolve_type(ceph_type=ceph_type)
-            #    for resolved_part in resolved_parts:
-            #        output.append(resolved_part + ": " + nom_mapping[resolved_part] + "~")
+                #pass
+        # resolved_parts = resolve_type(ceph_type=ceph_type)
+        #    for resolved_part in resolved_parts:
+        #        output.append(resolved_part + ": " + nom_mapping[resolved_part] + "~")
     output.append("\t\t||{")
-    output.append("\t\t\t" + struct_name + "{")
+    output.append("\t\t\t" + underscore_to_camelcase(struct_name) + "{")
     for line in public_properties:
         if line['name'] == 'HEAD_VERSION':
             continue
@@ -235,16 +301,17 @@ def decode_ceph_messages():
     extras = [
         "src/osd/ECMsgTypes.h",
         "src/osd/osd_types.h",
+        'src/osd/OpRequest.h',
     ]
     headers = os.listdir(os.path.join(prefix, 'src/messages'))
     for header in headers:
         try:
-            print("parsing " + header)
+            #print("parsing " + header)
             cpp_header = CppHeaderParser.CppHeader(os.path.join(prefix, 'src/messages', header))
             try:
                 for clazz in cpp_header.classes:
                     parts = cpp_header.classes[clazz]['properties']['public']
-                    print("Decoding: " + str(clazz))
+                    #print("Decoding: " + str(clazz))
                     add_unit_test(struct_name=clazz, parts=parts)
                     for output in add_struct(struct_name=clazz, public_properties=parts):
                         print output
@@ -263,8 +330,9 @@ def decode_ceph_messages():
             try:
                 for clazz in cpp_header.classes:
                     parts = cpp_header.classes[clazz]['properties']['public']
-                    print("Decoding: " + str(clazz))
-                    add_unit_test(struct_name=clazz, parts=parts)
+                    #print("Decoding: " + str(clazz))
+                    for output in add_unit_test(struct_name=clazz, parts=parts):
+                        print output
                     for output in add_struct(struct_name=clazz, public_properties=parts):
                         print output
                     for output in add_impl(struct_name=clazz, public_properties=parts):
